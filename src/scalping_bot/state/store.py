@@ -281,6 +281,10 @@ class StateStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def all_trade_events(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute("SELECT * FROM trades ORDER BY id ASC").fetchall()
+        return [dict(row) for row in rows]
+
     def export_json(self, equity: float, unrealized: float) -> str:
         stats = self.daily_stats(equity, unrealized)
         payload = {

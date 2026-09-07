@@ -177,6 +177,12 @@ class Settings(BaseSettings):
                 "This software is for education and paper trading only."
             )
 
+    def bar_minutes(self) -> int:
+        tf = self.bar_timeframe.strip().lower().replace(" ", "")
+        if tf.startswith("5"):
+            return 5
+        return 1
+
     def now_et(self, now: datetime | None = None) -> datetime:
         current = now or datetime.now(tz=ET)
         if current.tzinfo is None:

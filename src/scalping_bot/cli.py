@@ -250,6 +250,64 @@ def demo(
     typer.echo("Not financial advice. Paper simulation only.")
 
 
+@app.command()
+def backtest(
+    symbols: str = typer.Option(
+        "SPY,QQQ,AAPL,BTC/USD,ETH/USD",
+        help="Comma-separated symbols (stocks/ETFs + crypto pairs).",
+    ),
+    days: int = typer.Option(7, help="Calendar days of history (5–30 typical)."),
+    starting_equity: float = typer.Option(100_000.0, help="Starting cash/equity."),
+    seed: int | None = typer.Option(
+        None,
+        help="RNG seed. Used by --source simulator only; historical replay is deterministic.",
+    ),
+    interval: str = typer.Option(
+        "auto",
+        help="Bar size: auto, 1m, or 5m. auto uses 1m when days<=7 else 5m (Yahoo 1m cap).",
+    ),
+    strategy: str = typer.Option("momentum_scalp", help="Registered strategy name."),
+    source: str = typer.Option(
+        "historical",
+        help="historical (Yahoo/Coinbase/yfinance, no keys) or simulator (synthetic random-walk).",
+    ),
+    cache: bool = typer.Option(
+        True,
+        "--cache/--no-cache",
+        help="Cache downloaded bars under data/cache (default on).",
+    ),
+) -> None:
+    """Replay free historical bars through Strategy + RiskManager. No broker keys."""
+    from scalping_bot.backtest.runner import BacktestRequest, run_backtest
+    from scalping_bot.config import _parse_watchlist
+
+    if days < 1 or days > 60:
+        typer.secho("--days must be between 1 and 60", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    req = BacktestRequest(
+        symbols=_parse_watchlist(symbols),
+        days=days,
+        starting_equity=starting_equity,
+        strategy=strategy,
+        interval=interval,
+        source=source,
+        seed=seed,
+        use_cache=cache,
+    )
+    typer.echo(
+        f"Backtest starting source={source} days={days} interval={interval} "
+        f"strategy={strategy} symbols={','.join(req.symbols)}"
+    )
+    try:
+        report = run_backtest(req)
+    except Exception as exc:
+        typer.secho(f"Backtest failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo("")
+    typer.echo(report.render())
+
+
 @app.command("dry-run")
 def dry_run_cmd(
     minutes: int = typer.Option(5, help="Iterations to evaluate."),

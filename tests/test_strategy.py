@@ -2,12 +2,11 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from tests.helpers import choppy_setup, momentum_long_setup, session_start
-
 from scalping_bot.config import Settings
 from scalping_bot.models import OpenTrade, SignalAction, infer_asset_class
 from scalping_bot.strategy.base import MarketSnapshot
-from scalping_bot.strategy.momentum_scalp import MomentumScalpStrategy
+from scalping_bot.strategy.momentum_scalp import MomentumReclaimStrategy, MomentumScalpStrategy
+from tests.helpers import choppy_setup, momentum_long_setup, pullback_reclaim_setup, session_start
 
 
 def _settings() -> Settings:
@@ -127,3 +126,45 @@ def test_breakeven_trail() -> None:
     strat = MomentumScalpStrategy(_settings())
     assert strat.breakeven_stop(trade, 100.2) == 99.7
     assert strat.breakeven_stop(trade, 100.4) == 100.0
+
+
+def test_reclaim_holds_on_extension_chase() -> None:
+    from scalping_bot.indicators import closes, ema, last_value
+    from scalping_bot.models import Bar
+
+    bars = momentum_long_setup("AAPL")
+    fast = last_value(ema(closes(bars), 9))
+    assert fast is not None
+    prior = bars[-2]
+    # Lift the prior bar fully above EMA so this is a 3-bar chase, not a tag.
+    bars[-2] = Bar(
+        symbol=prior.symbol,
+        timestamp=prior.timestamp,
+        open=max(prior.open, fast + 0.04),
+        high=max(prior.high, fast + 0.08),
+        low=fast + 0.03,
+        close=max(prior.close, fast + 0.05),
+        volume=prior.volume,
+    )
+    snap = MarketSnapshot(symbol="AAPL", bars_1m=bars, now=bars[-1].timestamp)
+    signal = MomentumReclaimStrategy(_settings()).evaluate(snap)
+    assert signal.action is SignalAction.HOLD
+    assert signal.reason == "no_ema_pullback"
+
+
+def test_reclaim_enters_on_pullback() -> None:
+    bars = pullback_reclaim_setup("AAPL")
+    snap = MarketSnapshot(symbol="AAPL", bars_1m=bars, now=bars[-1].timestamp)
+    signal = MomentumReclaimStrategy(_settings()).evaluate(snap)
+    assert signal.action is SignalAction.BUY, signal.reason
+    assert signal.reason == "momentum_reclaim_entry"
+    assert signal.stop_price is not None and signal.take_profit_price is not None
+    assert signal.stop_price < bars[-1].close < signal.take_profit_price
+
+
+def test_crypto_entry_requires_target_to_cover_fees() -> None:
+    bars = momentum_long_setup("BTC/USD")
+    snap = MarketSnapshot(symbol="BTC/USD", bars_1m=bars, now=bars[-1].timestamp)
+    signal = MomentumScalpStrategy(_settings()).evaluate(snap)
+    assert signal.action is SignalAction.HOLD
+    assert signal.reason == "target_inside_round_trip_costs"

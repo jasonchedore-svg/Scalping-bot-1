@@ -3,7 +3,7 @@ from __future__ import annotations
 import signal
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from datetime import time as dt_time
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -165,6 +165,18 @@ class BotEngine:
                     self._exit(pos.symbol, "session_flatten")
                 positions = self.broker.get_positions()
 
+        leftover = [
+            p
+            for p in positions
+            if p.asset_class is AssetClass.STOCK
+            and not self.broker.is_tradable_now(p.symbol, now)
+        ]
+        if leftover:
+            log.info("session_closed_flatten", count=len(leftover))
+            for pos in leftover:
+                self._exit(pos.symbol, "session_closed")
+            positions = self.broker.get_positions()
+
         for pos in positions:
             self._manage_open(pos.symbol, now)
 
@@ -237,6 +249,9 @@ class BotEngine:
                     continue
             bars = self._bars(symbol)
             if not bars:
+                continue
+            stale_after = timedelta(minutes=max(self.settings.bar_minutes(), 1) * 2)
+            if now - bars[-1].timestamp > stale_after:
                 continue
             snap = MarketSnapshot(
                 symbol=symbol,

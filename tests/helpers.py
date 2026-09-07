@@ -81,3 +81,32 @@ def choppy_setup(symbol: str = "AAPL", n: int = 80) -> list[Bar]:
         price *= 1.0004 if i % 2 == 0 else 0.9996
         closes.append(price)
     return bars_from_closes(symbol, closes)
+
+
+def pullback_reclaim_setup(symbol: str = "AAPL", n: int = 90) -> list[Bar]:
+    """Uptrend, prior bar tags EMA(9), last bar reclaims it with volume."""
+    from scalping_bot.indicators import closes, ema, last_value
+
+    base = momentum_long_setup(symbol, n=max(n, 87))[:-2]
+    fast = last_value(ema(closes(base), 9))
+    assert fast is not None
+    t0 = base[-1].timestamp + timedelta(minutes=1)
+    dip = Bar(
+        symbol=symbol,
+        timestamp=t0,
+        open=fast + 0.02,
+        high=fast + 0.03,
+        low=fast - 0.06,
+        close=fast - 0.01,
+        volume=900_000.0,
+    )
+    reclaim = Bar(
+        symbol=symbol,
+        timestamp=t0 + timedelta(minutes=1),
+        open=fast - 0.01,
+        high=fast + 0.08,
+        low=fast - 0.02,
+        close=fast + 0.05,
+        volume=2_800_000.0,
+    )
+    return base + [dip, reclaim]
