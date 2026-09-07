@@ -9,6 +9,7 @@ jobs:
   pytest:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
@@ -19,6 +20,6 @@ jobs:
       - name: Install
         run: pip install -e ".[dev]"
       - name: Test
-        run: pytest
+        run: python -m pytest
       - name: Demo (no API keys)
-        run: scalping-bot demo --minutes 45 --symbols AAPL,BTC/USD
+        run: python -m scalping_bot demo --minutes 45 --symbols AAPL,BTC/USD
