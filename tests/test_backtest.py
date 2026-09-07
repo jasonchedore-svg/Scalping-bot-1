@@ -407,6 +407,9 @@ def test_swing_historical_backtest_fixture(tmp_path: Path) -> None:
     assert report.strategy == "trend_swing"
     assert report.interval_label == "1d"
     assert report.ending_equity > 0
+    assert report.baseline_name == "SPY"
+    assert report.baseline_return_pct is not None
     text = report.render()
     assert "Backtest summary" in text
+    assert "buy-and-hold" in text
     assert "SPY" in text

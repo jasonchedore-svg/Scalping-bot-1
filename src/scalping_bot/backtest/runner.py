@@ -186,6 +186,7 @@ def run_historical(req: BacktestRequest) -> BacktestReport:
         min_bars=min_bars,
     )
     curve = _attach_equity_curve(broker)
+    replay_from = broker.get_clock().timestamp
     steps = max(broker.remaining_steps(), 1)
     engine, store = _run_engine(settings, broker, steps)
     account = broker.get_account()
@@ -194,7 +195,6 @@ def run_historical(req: BacktestRequest) -> BacktestReport:
         f"Replayed {steps} bar closes through Strategy + RiskManager "
         "(same position caps, daily loss kill-switch, cooldowns as live/paper)."
     )
-    replay_from = broker.get_clock().timestamp
     notes.append(
         f"Trade window starts {replay_from.date().isoformat()} "
         f"(last bar {all_ts[-1].date().isoformat()}; --days={req.days})."

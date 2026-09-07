@@ -200,7 +200,18 @@ Same universe `SPY,QQQ,AAPL,BTC/USD,ETH/USD`, starting equity `$100,000`. Histor
 
 ### Swing: `trend_swing` daily (recommended path)
 
-Numbers from `scalping-bot swing-backtest --days 365` are recorded in the pull request summary after the run on this branch (and updated in this section when that run completes). Compare every swing result to **SPY buy-and-hold** over the same window — that is the honest baseline.
+`scalping-bot swing-backtest --days 365 --symbols SPY,QQQ,AAPL,BTC/USD,ETH/USD --starting-equity 100000`
+
+Window **2025-09-06 → 2026-09-06** (Yahoo daily bars; SMA warmup included but not traded). **Not a prediction of live results.**
+
+| | Trades | Win rate | Total P&L | Max DD | Notes |
+| --- | --- | --- | --- | --- | --- |
+| `trend_swing` | 49 | 34.7% | **−$1,656.84** | $4,665 (4.60%) | Fees $256 + slippage $311; 8 refusals; kill-switch off |
+| **SPY buy-and-hold** (same window) | 1 | — | **+$20,019.63** (**+20.02%**) | — | Honest baseline, not a strategy claim |
+
+Per-symbol realized P&L: AAPL **+$1,729** (11 trades), SPY **+$579** (16), QQQ **−$1,259** (15), BTC/USD **−$1,360** (5), ETH/USD **−$1,090** (2). Average win $503 vs average loss −$321.
+
+This swing ruleset **did not beat** buying and holding SPY over that year. It is still the recommended *engine path* (daily bars, wider stops, fewer trades) versus scalping, which had no edge either. Treat it as a research baseline, not a green light to size live risk.
 
 ### Legacy scalp (why this repo pivoted)
 
