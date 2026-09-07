@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -24,6 +25,11 @@ from scalping_bot.models import Bar, OrderRequest, Side
 from tests.helpers import momentum_long_setup, session_start
 
 ET = ZoneInfo("America/New_York")
+_ANSI = re.compile(r"\x1b\[[0-9;]*[mK]|\x1b\]8;;.*?\x1b\\")
+
+
+def _plain(text: str) -> str:
+    return _ANSI.sub("", text)
 
 
 def test_choose_interval_auto_and_fallback() -> None:
@@ -253,12 +259,17 @@ def test_simulator_source_uses_seed(tmp_path: Path) -> None:
 
 def test_cli_backtest_help() -> None:
     runner = CliRunner()
-    help_result = runner.invoke(app, ["backtest", "--help"])
+    help_result = runner.invoke(
+        app,
+        ["backtest", "--help"],
+        env={"NO_COLOR": "1", "TERM": "dumb", "COLUMNS": "120"},
+    )
     assert help_result.exit_code == 0, help_result.output
-    assert "--days" in help_result.stdout
-    assert "--symbols" in help_result.stdout
-    assert "--starting-equity" in help_result.stdout
-    assert "--seed" in help_result.stdout
+    text = _plain(help_result.output or help_result.stdout or "")
+    assert "--days" in text
+    assert "--symbols" in text
+    assert "--starting-equity" in text
+    assert "--seed" in text
 
 
 def test_cli_rejects_bad_days() -> None:
