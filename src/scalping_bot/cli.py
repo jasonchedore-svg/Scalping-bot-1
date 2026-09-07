@@ -14,7 +14,7 @@ from scalping_bot.models import LiveTradingDisabledError
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
-    help="Paper-first scalping / day-trading bot for US stocks and crypto.",
+    help="Paper-first trading bot (swing recommended; scalp is educational/legacy).",
 )
 
 
@@ -25,8 +25,13 @@ def _load_settings(
     watchlist: str | None = None,
     force_simulator: bool = False,
     state_dir: Path | None = None,
+    mode: str | None = None,
 ) -> Settings:
     payload = Settings().model_dump()
+    if mode == "swing":
+        from scalping_bot.config import apply_swing_profile
+
+        payload = apply_swing_profile(payload)
     if live:
         payload["paper"] = False
         payload["live_confirmed"] = True
@@ -52,7 +57,7 @@ def _boot(settings: Settings):
     from scalping_bot.strategy import load_strategy
 
     setup_logging(settings.log_level, settings.log_json)
-    store = StateStore(settings.db_path())
+    store = StateStore(settings.db_path(), persist_overnight_stocks=settings.hold_overnight)
     broker = make_broker(settings)
     strategy = load_strategy(settings.strategy, settings=settings)
     risk = RiskManager(settings, store)
@@ -70,11 +75,19 @@ def start(
     ),
     watchlist: str | None = typer.Option(None, help="Comma-separated symbols, e.g. AAPL,BTC/USD"),
     simulator: bool = typer.Option(False, help="Force the local paper simulator."),
+    mode: str = typer.Option(
+        "scalp",
+        help="scalp (legacy educational default) or swing (recommended).",
+    ),
 ) -> None:
     """Run the bot loop (paper by default). Foreground process."""
     try:
         settings = _load_settings(
-            live=live, dry_run=dry_run, watchlist=watchlist, force_simulator=simulator
+            live=live,
+            dry_run=dry_run,
+            watchlist=watchlist,
+            force_simulator=simulator,
+            mode=mode,
         )
     except LiveTradingDisabledError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
@@ -256,7 +269,7 @@ def backtest(
         "SPY,QQQ,AAPL,BTC/USD,ETH/USD",
         help="Comma-separated symbols (stocks/ETFs + crypto pairs).",
     ),
-    days: int = typer.Option(7, help="Calendar days of history (5–30 typical)."),
+    days: int = typer.Option(7, help="Calendar days of history (5–30 scalp; 180–365 swing)."),
     starting_equity: float = typer.Option(100_000.0, help="Starting cash/equity."),
     seed: int | None = typer.Option(
         None,
@@ -264,9 +277,12 @@ def backtest(
     ),
     interval: str = typer.Option(
         "auto",
-        help="Bar size: auto, 1m, or 5m. auto uses 1m when days<=7 else 5m (Yahoo 1m cap).",
+        help="Bar size: auto, 1m, 5m, or 1d. auto: 1m if days<=7, 5m if days<=59, else 1d.",
     ),
-    strategy: str = typer.Option("momentum_scalp", help="Registered strategy name."),
+    strategy: str = typer.Option(
+        "momentum_scalp",
+        help="Registered strategy name. Use trend_swing for daily swing backtests.",
+    ),
     source: str = typer.Option(
         "historical",
         help="historical (Yahoo/Coinbase/yfinance, no keys) or simulator (synthetic random-walk).",
@@ -276,13 +292,17 @@ def backtest(
         "--cache/--no-cache",
         help="Cache downloaded bars under data/cache (default on).",
     ),
+    mode: str = typer.Option(
+        "scalp",
+        help="scalp (intraday) or swing (daily bars, wider stops, trend_swing).",
+    ),
 ) -> None:
     """Replay free historical bars through Strategy + RiskManager. No broker keys."""
     from scalping_bot.backtest.runner import BacktestRequest, run_backtest
     from scalping_bot.config import _parse_watchlist
 
-    if days < 1 or days > 60:
-        typer.secho("--days must be between 1 and 60", fg=typer.colors.RED, err=True)
+    if days < 1 or days > 800:
+        typer.secho("--days must be between 1 and 800", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
 
     req = BacktestRequest(
@@ -294,10 +314,59 @@ def backtest(
         source=source,
         seed=seed,
         use_cache=cache,
+        mode=mode,
     )
     typer.echo(
         f"Backtest starting source={source} days={days} interval={interval} "
-        f"strategy={strategy} symbols={','.join(req.symbols)}"
+        f"strategy={strategy} mode={mode} symbols={','.join(req.symbols)}"
+    )
+    try:
+        report = run_backtest(req)
+    except Exception as exc:
+        typer.secho(f"Backtest failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo("")
+    typer.echo(report.render())
+
+
+@app.command("swing-backtest")
+def swing_backtest(
+    symbols: str = typer.Option(
+        "SPY,QQQ,AAPL,BTC/USD,ETH/USD",
+        help="Comma-separated symbols (stocks/ETFs + crypto pairs).",
+    ),
+    days: int = typer.Option(365, help="Calendar days of daily history (6–12 months typical)."),
+    starting_equity: float = typer.Option(100_000.0, help="Starting cash/equity."),
+    cache: bool = typer.Option(
+        True,
+        "--cache/--no-cache",
+        help="Cache downloaded bars under data/cache (default on).",
+    ),
+) -> None:
+    """Daily-bar swing backtest (recommended). No broker keys. Includes SPY buy-and-hold."""
+    from scalping_bot.backtest.runner import BacktestRequest, run_backtest
+    from scalping_bot.config import _parse_watchlist
+
+    if days < 60 or days > 800:
+        typer.secho(
+            "--days must be between 60 and 800 for swing-backtest",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    req = BacktestRequest(
+        symbols=_parse_watchlist(symbols),
+        days=days,
+        starting_equity=starting_equity,
+        strategy="trend_swing",
+        interval="1d",
+        source="historical",
+        use_cache=cache,
+        mode="swing",
+    )
+    typer.echo(
+        f"Swing backtest days={days} interval=1d strategy=trend_swing "
+        f"symbols={','.join(req.symbols)}"
     )
     try:
         report = run_backtest(req)

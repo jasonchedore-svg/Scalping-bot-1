@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "scalping-bot"
 version = "0.1.0"
-description = "Paper-first scalping bot with key-free historical backtests (Yahoo) for US stocks and crypto."
+description = "Paper-first swing (recommended) and educational scalping bot with key-free Yahoo backtests."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

@@ -15,9 +15,10 @@ ET = ZoneInfo("America/New_York")
 class StateStore:
     """SQLite persistence for daily P&amp;L, open trades, and kill-switch."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, persist_overnight_stocks: bool = False) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
+        self.persist_overnight_stocks = persist_overnight_stocks
         self._conn = sqlite3.connect(path)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -98,10 +99,12 @@ class StateStore:
             self.set_meta("current_day", day)
             self.set_meta("kill_switch", "0")
             self.set_meta("kill_reason", "")
-            # Drop leftover stock scalp state across sessions; crypto may persist.
-            self._conn.execute(
-                "DELETE FROM open_trades WHERE symbol NOT LIKE '%/%'",
-            )
+            # Scalp leftover stock state is dropped at the session boundary.
+            # Swing holds stocks overnight / across days.
+            if not self.persist_overnight_stocks:
+                self._conn.execute(
+                    "DELETE FROM open_trades WHERE symbol NOT LIKE '%/%'",
+                )
             self._conn.commit()
         else:
             self._conn.execute(

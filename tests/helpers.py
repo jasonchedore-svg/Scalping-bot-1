@@ -20,10 +20,14 @@ def bars_from_closes(
     start: datetime | None = None,
     volumes: list[float] | None = None,
     bullish: bool = True,
+    step: timedelta | None = None,
+    skip_weekends: bool = False,
 ) -> list[Bar]:
     start = start or session_start()
+    step = step or timedelta(minutes=1)
     out: list[Bar] = []
     prev = closes[0]
+    ts = start
     for i, close in enumerate(closes):
         open_px = prev if i else close * 0.999
         if bullish and close >= open_px:
@@ -42,7 +46,7 @@ def bars_from_closes(
         out.append(
             Bar(
                 symbol=symbol,
-                timestamp=start + timedelta(minutes=i),
+                timestamp=ts,
                 open=open_px,
                 high=high,
                 low=low,
@@ -51,6 +55,10 @@ def bars_from_closes(
             )
         )
         prev = close
+        ts = ts + step
+        if skip_weekends:
+            while ts.weekday() >= 5:
+                ts += timedelta(days=1)
     return out
 
 
@@ -110,3 +118,70 @@ def pullback_reclaim_setup(symbol: str = "AAPL", n: int = 90) -> list[Bar]:
         volume=2_800_000.0,
     )
     return base + [dip, reclaim]
+
+
+def trend_swing_entry_setup(symbol: str = "SPY", n: int = 230) -> list[Bar]:
+    """Daily uptrend, SMA50 pullback, bullish reclaim. Satisfies trend_swing entry."""
+    from scalping_bot.indicators import closes, last_value, sma
+
+    start = datetime(2023, 1, 3, 15, 30, tzinfo=ET)
+    px = 100.0
+    seq: list[float] = []
+    for i in range(max(n, 220)):
+        px *= 0.9985 if i % 8 == 7 else 1.0022
+        seq.append(px)
+    # Drop last 10 placeholders; rebuild them against SMA50.
+    body = seq[:-10]
+    bars = bars_from_closes(
+        symbol,
+        body,
+        start=start,
+        step=timedelta(days=1),
+        skip_weekends=True,
+    )
+    fast = last_value(sma(closes(bars), 50))
+    assert fast is not None
+    ts = bars[-1].timestamp
+    extra: list[Bar] = []
+    px = bars[-1].close
+    # Nine pullback sessions that tag SMA50, then a bullish reclaim.
+    for i in range(9):
+        ts = ts + timedelta(days=1)
+        while ts.weekday() >= 5:
+            ts += timedelta(days=1)
+        tag = fast * (0.997 if i < 8 else 0.999)
+        close = fast * 1.001 if i < 8 else fast * 1.004
+        open_px = max(tag, close * 0.999)
+        extra.append(
+            Bar(
+                symbol=symbol,
+                timestamp=ts,
+                open=open_px,
+                high=max(open_px, close) * 1.002,
+                low=min(tag, close) * 0.999,
+                close=close,
+                volume=1_200_000.0,
+            )
+        )
+        px = close
+        fast = last_value(sma(closes(bars + extra), 50)) or fast
+    ts = ts + timedelta(days=1)
+    while ts.weekday() >= 5:
+        ts += timedelta(days=1)
+    fast = last_value(sma(closes(bars + extra), 50)) or fast
+    close = fast * 1.006
+    open_px = fast * 0.999
+    extra.append(
+        Bar(
+            symbol=symbol,
+            timestamp=ts,
+            open=open_px,
+            high=close * 1.004,
+            low=min(open_px, fast * 0.998),
+            close=close,
+            volume=1_500_000.0,
+        )
+    )
+    out = bars + extra
+    return out
+

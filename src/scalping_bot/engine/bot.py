@@ -157,7 +157,7 @@ class BotEngine:
             return
 
         et_now = now.astimezone(ET)
-        if self._past(et_now.time(), self.settings.flatten_et):
+        if self.settings.session_flatten and self._past(et_now.time(), self.settings.flatten_et):
             stock_open = [p for p in positions if p.asset_class is AssetClass.STOCK]
             if stock_open:
                 log.info("session_flatten", count=len(stock_open))
@@ -169,6 +169,7 @@ class BotEngine:
             p
             for p in positions
             if p.asset_class is AssetClass.STOCK
+            and not self.settings.hold_overnight
             and not self.broker.is_tradable_now(p.symbol, now)
         ]
         if leftover:
@@ -214,7 +215,10 @@ class BotEngine:
 
         last = bars[-1]
         high_water = max(trade.high_water, last.high, last.close)
-        if isinstance(self.strategy, MomentumScalpStrategy):
+        trail = getattr(self.strategy, "trail_stop", None)
+        if callable(trail):
+            new_stop = trail(trade, high_water)
+        elif isinstance(self.strategy, MomentumScalpStrategy):
             new_stop = self.strategy.breakeven_stop(trade, high_water)
         else:
             new_stop = trade.stop_price
@@ -243,16 +247,18 @@ class BotEngine:
             if asset is AssetClass.STOCK:
                 if not self.broker.is_tradable_now(symbol, now):
                     continue
-                if et_now.time() < self.settings.entry_start_et:
-                    continue
-                if self._past(et_now.time(), self.settings.entry_cutoff_et):
-                    continue
+                if self.settings.session_hours_filter:
+                    if et_now.time() < self.settings.entry_start_et:
+                        continue
+                    if self._past(et_now.time(), self.settings.entry_cutoff_et):
+                        continue
             bars = self._bars(symbol)
             if not bars:
                 continue
-            stale_after = timedelta(minutes=max(self.settings.bar_minutes(), 1) * 2)
-            if now - bars[-1].timestamp > stale_after:
-                continue
+            if not self.settings.hold_overnight:
+                stale_after = timedelta(minutes=max(self.settings.bar_minutes(), 1) * 2)
+                if now - bars[-1].timestamp > stale_after:
+                    continue
             snap = MarketSnapshot(
                 symbol=symbol,
                 bars_1m=bars,
@@ -286,7 +292,10 @@ class BotEngine:
 
     def _enter(self, symbol: str, qty: float, signal, now: datetime) -> None:
         asset = infer_asset_class(symbol)
-        tif = TimeInForce.GTC if asset is AssetClass.CRYPTO else TimeInForce.DAY
+        if asset is AssetClass.CRYPTO or self.settings.hold_overnight:
+            tif = TimeInForce.GTC
+        else:
+            tif = TimeInForce.DAY
         request = OrderRequest(
             symbol=symbol,
             qty=qty,

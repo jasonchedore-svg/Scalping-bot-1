@@ -15,9 +15,22 @@ from scalping_bot.models import AssetClass, Bar, infer_asset_class, normalize_sy
 ET = ZoneInfo("America/New_York")
 
 YAHOO_1M_MAX_CALENDAR_DAYS = 7
+YAHOO_5M_MAX_CALENDAR_DAYS = 59
+SWING_AUTO_MIN_DAYS = 60
+SMA200_WARMUP_CALENDAR_DAYS = 400
 BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
 COINBASE_CANDLES = "https://api.exchange.coinbase.com/products/{product}/candles"
 DEFAULT_CACHE_DIR = Path("data/cache")
+COINBASE_GRANULARITY = {
+    "1m": 60,
+    "1min": 60,
+    "5m": 300,
+    "5min": 300,
+    "1d": 86400,
+    "1day": 86400,
+    "day": 86400,
+    "daily": 86400,
+}
 
 CRYPTO_BINANCE: dict[str, str] = {
     "BTC/USD": "BTCUSDT",
@@ -62,9 +75,33 @@ class HistoryBundle:
         return {sym: hist.bars for sym, hist in self.by_symbol.items()}
 
 
+def yf_interval_for(minutes: int) -> str:
+    if minutes >= 1440:
+        return "1d"
+    if minutes == 1:
+        return "1m"
+    return "5m"
+
+
+def warmup_calendar_days(interval: IntervalChoice) -> int:
+    """Extra history so SMA(200) (or scalp EMAs) is live at the start of --days."""
+    if interval.minutes >= 1440:
+        return SMA200_WARMUP_CALENDAR_DAYS
+    if interval.minutes == 1:
+        return 1
+    return 2
+
+
 def choose_interval(days: int, requested: str = "auto") -> IntervalChoice:
-    """Pick 1m vs 5m. Yahoo 1-minute US equity history is about 7 calendar days."""
+    """Pick 1m, 5m, or 1d. Yahoo 1-minute US equity history is about 7 calendar days."""
     req = requested.strip().lower()
+    daily_note = (
+        "Daily bars (recommended for swing). Fetch includes ~400 extra calendar days "
+        "so SMA(50)/SMA(200) are warm at the start of the --days window. "
+        "Crypto uses Yahoo `BTC-USD` then Coinbase public USD candles; Binance is last resort."
+    )
+    if req in {"1d", "1day", "day", "daily", "d"}:
+        return IntervalChoice("1d", 1440, daily_note)
     if req in {"5m", "5min", "5minute", "5"}:
         return IntervalChoice(
             "5m",
@@ -94,14 +131,20 @@ def choose_interval(days: int, requested: str = "auto") -> IntervalChoice:
             f"Auto interval: 1-minute bars because --days={days} <= "
             f"{YAHOO_1M_MAX_CALENDAR_DAYS}. {yahoo_cap_note}",
         )
+    if days < SWING_AUTO_MIN_DAYS:
+        return IntervalChoice(
+            "5m",
+            5,
+            f"Auto interval: 5-minute bars because --days={days} is between "
+            f"{YAHOO_1M_MAX_CALENDAR_DAYS + 1} and {SWING_AUTO_MIN_DAYS - 1}. {yahoo_cap_note} "
+            "On 5-minute bars the same EMA/RSI periods cover more time; holds are still "
+            "measured in clock minutes (default max hold 20 minutes = four 5-minute bars).",
+            fallback_from_1m=True,
+        )
     return IntervalChoice(
-        "5m",
-        5,
-        f"Auto interval: 5-minute bars because --days={days} > "
-        f"{YAHOO_1M_MAX_CALENDAR_DAYS}. {yahoo_cap_note} "
-        "On 5-minute bars the same EMA/RSI periods cover more time; holds are still "
-        "measured in clock minutes (default max hold 20 minutes = four 5-minute bars).",
-        fallback_from_1m=True,
+        "1d",
+        1440,
+        f"Auto interval: daily bars because --days={days} >= {SWING_AUTO_MIN_DAYS}. {daily_note}",
     )
 
 
@@ -126,6 +169,40 @@ def _ensure_tz(ts: datetime) -> datetime:
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=UTC)
     return ts.astimezone(ET)
+
+
+def as_daily_session_ts(ts: datetime) -> datetime:
+    """Map a daily bar to 15:30 America/New_York on its session date.
+
+    Yahoo/Coinbase/Binance often stamp daily candles at midnight UTC, which is the
+    previous evening in ET and would fail a regular-hours tradable check.
+    """
+    if ts.tzinfo is None:
+        d = ts.date()
+    else:
+        utc = ts.astimezone(UTC)
+        if utc.hour == 0 and utc.minute == 0:
+            d = utc.date()
+        else:
+            d = ts.astimezone(ET).date()
+    return datetime(d.year, d.month, d.day, 15, 30, tzinfo=ET)
+
+
+def rebase_daily_bars(bars: list[Bar]) -> list[Bar]:
+    uniq: dict[datetime, Bar] = {}
+    for bar in bars:
+        ts = as_daily_session_ts(bar.timestamp)
+        uniq[ts] = Bar(
+            symbol=bar.symbol,
+            timestamp=ts,
+            open=bar.open,
+            high=bar.high,
+            low=bar.low,
+            close=bar.close,
+            volume=bar.volume,
+            vwap=bar.vwap,
+        )
+    return [uniq[k] for k in sorted(uniq)]
 
 
 def rows_to_bars(
@@ -201,7 +278,10 @@ def fetch_coinbase_candles(
     pause_s: float = 0.12,
 ) -> list[Bar]:
     product = coinbase_product(symbol)
-    granularity = 60 if interval in {"1m", "1min"} else 300
+    key = interval.strip().lower()
+    granularity = COINBASE_GRANULARITY.get(key)
+    if granularity is None:
+        raise ValueError(f"Unsupported Coinbase interval {interval!r}")
     # Public endpoint caps each response (~300 candles). Page forward in time.
     window = timedelta(seconds=granularity * 280)
     cursor = start.astimezone(UTC)
@@ -288,22 +368,40 @@ def fetch_binance_klines(
     return [uniq[k] for k in sorted(uniq)]
 
 
-def _yahoo_download(ticker: str, period: str, interval: str):
+def _as_date_str(value: datetime | str) -> str:
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    return str(value)
+
+
+def _yahoo_download(
+    ticker: str,
+    interval: str,
+    *,
+    period: str | None = None,
+    start: datetime | str | None = None,
+    end: datetime | str | None = None,
+):
     try:
         import yfinance as yf
     except ImportError as exc:
         raise RuntimeError(
             "yfinance is required for stock/ETF history. Install with pip install -e ."
         ) from exc
-    return yf.download(
-        ticker,
-        period=period,
-        interval=interval,
-        auto_adjust=True,
-        prepost=False,
-        progress=False,
-        threads=False,
-    )
+    kwargs: dict = {
+        "interval": interval,
+        "auto_adjust": True,
+        "prepost": False,
+        "progress": False,
+        "threads": False,
+    }
+    if start is not None:
+        kwargs["start"] = _as_date_str(start)
+        if end is not None:
+            kwargs["end"] = _as_date_str(end)
+    else:
+        kwargs["period"] = period or "1mo"
+    return yf.download(ticker, **kwargs)
 
 
 def _frame_to_rows(frame) -> list[tuple[datetime, float, float, float, float, float]]:
@@ -349,9 +447,16 @@ def _frame_to_rows(frame) -> list[tuple[datetime, float, float, float, float, fl
     return rows
 
 
-def fetch_yahoo_bars(symbol: str, *, period: str, interval: str) -> list[Bar]:
+def fetch_yahoo_bars(
+    symbol: str,
+    *,
+    interval: str,
+    period: str | None = None,
+    start: datetime | str | None = None,
+    end: datetime | str | None = None,
+) -> list[Bar]:
     ticker = yahoo_ticker(symbol)
-    frame = _yahoo_download(ticker, period, interval)
+    frame = _yahoo_download(ticker, interval, period=period, start=start, end=end)
     rows = _frame_to_rows(frame)
     return rows_to_bars(symbol, rows)
 
@@ -417,7 +522,9 @@ def save_cached(
 def _crypto_yahoo_period(days: int, interval: str) -> str:
     if interval == "1m":
         return f"{min(days + 1, YAHOO_1M_MAX_CALENDAR_DAYS)}d"
-    return f"{min(days + 2, 59)}d"
+    if interval == "1d":
+        return "5y" if days > 400 else "2y"
+    return f"{min(days + 2, YAHOO_5M_MAX_CALENDAR_DAYS)}d"
 
 
 def _fetch_crypto_bars(
@@ -430,8 +537,11 @@ def _fetch_crypto_bars(
 ) -> tuple[list[Bar], str, str]:
     errors: list[str] = []
     try:
-        period = _crypto_yahoo_period(days, yf_interval)
-        bars = fetch_yahoo_bars(symbol, period=period, interval=yf_interval)
+        if yf_interval == "1d":
+            bars = fetch_yahoo_bars(symbol, interval=yf_interval, start=start, end=end)
+        else:
+            period = _crypto_yahoo_period(days, yf_interval)
+            bars = fetch_yahoo_bars(symbol, period=period, interval=yf_interval)
         if len(bars) >= 30:
             return (
                 bars,
@@ -481,9 +591,11 @@ def fetch_symbol_history(
 ) -> SymbolHistory:
     symbol = normalize_symbol(symbol)
     asset = infer_asset_class(symbol)
-    yf_interval = "1m" if interval.minutes == 1 else "5m"
+    yf_interval = yf_interval_for(interval.minutes)
+    warmup_days = warmup_calendar_days(interval)
+    cache_interval = f"{yf_interval}_w{warmup_days}"
     if cache_dir is not None and use_cache:
-        cached = load_cached(cache_dir, symbol, yf_interval, days)
+        cached = load_cached(cache_dir, symbol, cache_interval, days)
         if cached:
             return SymbolHistory(
                 symbol=symbol,
@@ -493,28 +605,46 @@ def fetch_symbol_history(
                 note=f"Loaded {len(cached)} bars from cache.",
             )
 
-    warmup = timedelta(days=1 if interval.minutes == 1 else 2)
     end = now or datetime.now(tz=UTC)
-    start = end - timedelta(days=days) - warmup
+    start = end - timedelta(days=days + warmup_days)
 
     if asset is AssetClass.CRYPTO:
         bars, source, note = _fetch_crypto_bars(
-            symbol, yf_interval=yf_interval, days=days, start=start, end=end
+            symbol,
+            yf_interval=yf_interval,
+            days=days + warmup_days,
+            start=start,
+            end=end,
         )
+    elif yf_interval == "1d":
+        # yfinance `end` is exclusive.
+        bars = fetch_yahoo_bars(
+            symbol,
+            interval=yf_interval,
+            start=start,
+            end=end + timedelta(days=1),
+        )
+        source = "yfinance"
+        note = f"Yahoo Finance {yahoo_ticker(symbol)} {yf_interval} ({len(bars)} bars)."
     else:
         if interval.minutes == 1:
-            period = f"{min(days + 1, YAHOO_1M_MAX_CALENDAR_DAYS)}d"
+            period = f"{min(days + warmup_days, YAHOO_1M_MAX_CALENDAR_DAYS)}d"
         else:
-            period = f"{min(days + 2, 59)}d"
+            period = f"{min(days + warmup_days, YAHOO_5M_MAX_CALENDAR_DAYS)}d"
         bars = fetch_yahoo_bars(symbol, period=period, interval=yf_interval)
         source = "yfinance"
         note = f"Yahoo Finance {yahoo_ticker(symbol)} {yf_interval} ({len(bars)} bars, RTH)."
 
-    cutoff = end - timedelta(days=days) - warmup
-    bars = [b for b in bars if b.timestamp >= cutoff.astimezone(ET)]
-    note = f"{note} Kept {len(bars)} bars after window cutoff."
+    if interval.minutes >= 1440:
+        bars = rebase_daily_bars(bars)
+    cutoff = (end - timedelta(days=days + warmup_days)).astimezone(ET)
+    bars = [b for b in bars if b.timestamp >= cutoff]
+    note = (
+        f"{note} Kept {len(bars)} bars after window cutoff "
+        f"(includes {warmup_days}d indicator warmup)."
+    )
     if cache_dir is not None and bars:
-        save_cached(cache_dir, symbol, yf_interval, days, bars)
+        save_cached(cache_dir, symbol, cache_interval, days, bars)
     return SymbolHistory(
         symbol=symbol,
         bars=bars,
@@ -547,10 +677,12 @@ def fetch_bundle(
             use_cache=use_cache,
             now=now,
         )
-        if len(hist.bars) < 30:
+        min_keep = 80 if interval.minutes >= 1440 else 30
+        if len(hist.bars) < min_keep:
             dropped.append(symbol)
             notes.append(
-                f"{symbol}: skipped ({hist.source}: {len(hist.bars)} bars, need >= 30). {hist.note}"
+                f"{symbol}: skipped ({hist.source}: {len(hist.bars)} bars, "
+                f"need >= {min_keep}). {hist.note}"
             )
             continue
         by_symbol[symbol] = hist

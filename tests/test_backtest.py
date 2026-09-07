@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -12,6 +12,7 @@ from scalping_bot.backtest.fetch import (
     HistoryBundle,
     IntervalChoice,
     SymbolHistory,
+    as_daily_session_ts,
     choose_interval,
     parse_binance_klines,
     parse_coinbase_candles,
@@ -22,7 +23,7 @@ from scalping_bot.backtest.report import max_drawdown, pair_round_trips, summari
 from scalping_bot.backtest.runner import BacktestRequest, run_backtest
 from scalping_bot.cli import app
 from scalping_bot.models import Bar, OrderRequest, Side
-from tests.helpers import momentum_long_setup, session_start
+from tests.helpers import momentum_long_setup, session_start, trend_swing_entry_setup
 
 ET = ZoneInfo("America/New_York")
 _ANSI = re.compile(r"\x1b\[[0-9;]*[mK]|\x1b\]8;;.*?\x1b\\")
@@ -43,6 +44,13 @@ def test_choose_interval_auto_and_fallback() -> None:
     assert forced.fallback_from_1m is True
     five = choose_interval(3, "5m")
     assert five.minutes == 5
+    yearly = choose_interval(180, "auto")
+    assert yearly.minutes == 1440
+    assert yearly.label == "1d"
+    forced_daily = choose_interval(7, "1d")
+    assert forced_daily.minutes == 1440
+    thirty = choose_interval(30, "auto")
+    assert thirty.minutes == 5
 
 
 def test_yahoo_and_binance_symbol_mapping() -> None:
@@ -272,6 +280,19 @@ def test_cli_backtest_help() -> None:
     assert "--seed" in text
 
 
+def test_cli_swing_backtest_help() -> None:
+    runner = CliRunner()
+    help_result = runner.invoke(
+        app,
+        ["swing-backtest", "--help"],
+        env={"NO_COLOR": "1", "TERM": "dumb", "COLUMNS": "120"},
+    )
+    assert help_result.exit_code == 0, help_result.output
+    text = _plain(help_result.output or help_result.stdout or "")
+    assert "--days" in text
+    assert "365" in text or "daily" in text.lower() or "swing" in text.lower()
+
+
 def test_cli_rejects_bad_days() -> None:
     runner = CliRunner()
     result = runner.invoke(app, ["backtest", "--days", "0"])
@@ -316,3 +337,76 @@ def test_cli_simulator_backtest_short(monkeypatch) -> None:
     )
     assert result.exit_code == 0, result.output
     assert "Backtest summary" in result.output
+
+
+def test_daily_session_timestamp_and_tradable() -> None:
+    naive = datetime(2024, 6, 13, 0, 0)
+    ts = as_daily_session_ts(naive)
+    assert ts.tzinfo is not None
+    assert ts.hour == 15 and ts.minute == 30
+    utc = datetime(2024, 6, 13, 0, 0, tzinfo=UTC)
+    assert as_daily_session_ts(utc).date().isoformat() == "2024-06-13"
+
+    bars = trend_swing_entry_setup("SPY")
+    broker = HistoricalReplayBroker(
+        {"SPY": bars},
+        cash=50_000,
+        interval_minutes=1440,
+        start_index=len(bars) - 5,
+        min_bars=2,
+    )
+    assert broker.is_tradable_now("SPY") is True
+    saturday = datetime(2024, 6, 15, 15, 30, tzinfo=ET)
+    assert broker.is_tradable_now("SPY", saturday) is False
+
+
+def test_swing_historical_backtest_fixture(tmp_path: Path) -> None:
+    bars = trend_swing_entry_setup("SPY")
+    last = bars[-1]
+    # Two follow-through days so the engine can exit after entry.
+    follow = []
+    ts = last.timestamp
+    px = last.close
+    for _ in range(3):
+        ts = ts + timedelta(days=1)
+        while ts.weekday() >= 5:
+            ts += timedelta(days=1)
+        nxt = px * 1.04
+        follow.append(
+            Bar(
+                symbol="SPY",
+                timestamp=ts,
+                open=px,
+                high=nxt * 1.01,
+                low=px * 0.995,
+                close=nxt,
+                volume=1_200_000,
+            )
+        )
+        px = nxt
+    series = bars + follow
+    bundle = HistoryBundle(
+        symbols=["SPY"],
+        by_symbol={"SPY": SymbolHistory("SPY", series, "fixture", 1440, "swing fixture")},
+        interval=IntervalChoice("1d", 1440, "fixture 1d"),
+        notes=["unit fixture, no network"],
+    )
+    report = run_backtest(
+        BacktestRequest(
+            symbols=["SPY"],
+            days=400,
+            starting_equity=100_000,
+            bundle=bundle,
+            state_dir=tmp_path / "swing",
+            source="historical",
+            strategy="trend_swing",
+            mode="swing",
+            interval="1d",
+        )
+    )
+    assert report.strategy == "trend_swing"
+    assert report.interval_label == "1d"
+    assert report.ending_equity > 0
+    text = report.render()
+    assert "Backtest summary" in text
+    assert "SPY" in text

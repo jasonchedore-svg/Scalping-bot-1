@@ -58,6 +58,9 @@ class BacktestReport:
     by_symbol: dict[str, SymbolStats] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     rounds: list[dict] = field(default_factory=list)
+    baseline_name: str | None = None
+    baseline_return_pct: float | None = None
+    baseline_pnl: float | None = None
 
     @property
     def total_pnl(self) -> float:
@@ -101,6 +104,16 @@ class BacktestReport:
             "",
             "Per-symbol:",
         ]
+        if self.baseline_name and self.baseline_return_pct is not None:
+            pnl = self.baseline_pnl if self.baseline_pnl is not None else 0.0
+            lines.insert(
+                -2,
+                (
+                    f"baseline {self.baseline_name} buy-and-hold: "
+                    f"return={self.baseline_return_pct:.2%} pnl={pnl:.2f} "
+                    f"on ${self.starting_equity:,.0f}"
+                ),
+            )
         if not self.by_symbol:
             lines.append("  (no closed trades)")
         for symbol in sorted(self.by_symbol):
@@ -203,6 +216,9 @@ def build_report(
     crypto_fee_bps: float,
     refused: int,
     notes: list[str],
+    baseline_name: str | None = None,
+    baseline_return_pct: float | None = None,
+    baseline_pnl: float | None = None,
 ) -> BacktestReport:
     events = store.all_trade_events()
     rounds = pair_round_trips(events)
@@ -232,4 +248,7 @@ def build_report(
         by_symbol=by_symbol,
         notes=notes,
         rounds=rounds,
+        baseline_name=baseline_name,
+        baseline_return_pct=baseline_return_pct,
+        baseline_pnl=baseline_pnl,
     )

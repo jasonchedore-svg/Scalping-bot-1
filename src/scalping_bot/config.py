@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from scalping_bot.models import LiveTradingDisabledError, normalize_symbol
@@ -111,6 +111,17 @@ class Settings(BaseSettings):
     rsi_fade: float = 75.0
     min_hold_before_fade_minutes: int = 5
 
+    # Trading style. "scalp" is the educational/legacy default; "swing" is recommended.
+    mode: str = "scalp"
+    session_flatten: bool = True
+    hold_overnight: bool = False
+    session_hours_filter: bool = True
+    max_hold_days: int = 0
+    sma_fast: int = 50
+    sma_slow: int = 200
+    swing_pullback_bars: int = 10
+    min_hold_before_trend_exit_days: int = 3
+
     @field_validator("watchlist", mode="before")
     @classmethod
     def _watchlist(cls, value: str | list[str]) -> list[str]:
@@ -177,8 +188,35 @@ class Settings(BaseSettings):
                 "This software is for education and paper trading only."
             )
 
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _mode(cls, value: str) -> str:
+        raw = str(value).strip().lower()
+        if raw not in {"scalp", "swing"}:
+            raise ValueError("mode must be 'scalp' or 'swing'")
+        return raw
+
+    @model_validator(mode="after")
+    def _apply_swing_if_needed(self) -> Settings:
+        if not (self.mode == "swing" or self.strategy == "trend_swing"):
+            return self
+        if self.max_stop_pct <= 0.01:
+            for key, value in swing_settings_overrides().items():
+                setattr(self, key, value)
+            return self
+        self.mode = "swing"
+        self.session_flatten = False
+        self.hold_overnight = True
+        self.session_hours_filter = False
+        return self
+
+    def is_swing(self) -> bool:
+        return self.mode == "swing" or self.strategy == "trend_swing"
+
     def bar_minutes(self) -> int:
         tf = self.bar_timeframe.strip().lower().replace(" ", "")
+        if tf.startswith("1d") or "day" in tf:
+            return 1440
         if tf.startswith("5"):
             return 5
         return 1
@@ -188,6 +226,42 @@ class Settings(BaseSettings):
         if current.tzinfo is None:
             current = current.replace(tzinfo=ET)
         return current.astimezone(ET)
+
+
+def swing_settings_overrides() -> dict:
+    """Risk and session profile for multi-day holds. Does not touch live gates."""
+    return {
+        "mode": "swing",
+        "strategy": "trend_swing",
+        "bar_timeframe": "1Day",
+        "bar_lookback": 250,
+        "session_flatten": False,
+        "hold_overnight": True,
+        "session_hours_filter": False,
+        "max_hold_days": 15,
+        "max_hold_minutes": 15 * 24 * 60,
+        "stop_atr_mult": 2.0,
+        "take_profit_atr_mult": 3.0,
+        "min_stop_pct": 0.02,
+        "max_stop_pct": 0.12,
+        "min_take_profit_pct": 0.03,
+        "max_take_profit_pct": 0.30,
+        "max_trades_per_day": 2,
+        "max_open_positions": 4,
+        "max_position_notional": 15_000.0,
+        "max_position_pct": 0.15,
+        "risk_per_trade_pct": 0.0075,
+        "cooldown_seconds": 86_400,
+        "max_daily_loss_pct": 0.03,
+        "use_5m_trend_filter": False,
+        "poll_interval_seconds": 60.0,
+    }
+
+
+def apply_swing_profile(payload: dict) -> dict:
+    merged = dict(payload)
+    merged.update(swing_settings_overrides())
+    return merged
 
 
 @lru_cache(maxsize=1)

@@ -163,6 +163,49 @@ def test_stop_too_wide(tmp_path: Path) -> None:
     assert decision.reason == "stop_too_wide_for_scalp"
 
 
+def test_swing_allows_wide_stop(tmp_path: Path) -> None:
+    mgr, _store, settings = _mgr(tmp_path, mode="swing")
+    assert settings.is_swing()
+    assert settings.max_stop_pct >= 0.10
+    now = datetime(2024, 6, 13, 10, 30, tzinfo=ET)
+    signal = Signal(
+        action=SignalAction.BUY,
+        symbol="SPY",
+        reason="trend_swing_entry",
+        entry_price=100,
+        stop_price=95.0,
+        take_profit_price=110.0,
+    )
+    decision = mgr.evaluate_entry(signal, _account(), [], now, 100.0)
+    assert decision.allowed, decision.reason
+    assert decision.qty > 0
+
+
+def test_overnight_stock_state_persists_for_swing(tmp_path: Path) -> None:
+    from scalping_bot.models import OpenTrade
+
+    scalp = StateStore(tmp_path / "scalp.db", persist_overnight_stocks=False)
+    swing = StateStore(tmp_path / "swing.db", persist_overnight_stocks=True)
+    d1 = datetime(2024, 6, 13, 15, 30, tzinfo=ET)
+    d2 = datetime(2024, 6, 14, 15, 30, tzinfo=ET)
+    trade = OpenTrade(
+        symbol="SPY",
+        qty=10,
+        entry_price=100,
+        entry_time=d1,
+        stop_price=94,
+        take_profit_price=110,
+        asset_class=AssetClass.STOCK,
+        high_water=100,
+    )
+    for store in (scalp, swing):
+        store.ensure_trading_day(d1, 100_000.0)
+        store.upsert_open_trade(trade)
+        store.ensure_trading_day(d2, 100_000.0)
+    assert scalp.get_open_trade("SPY") is None
+    assert swing.get_open_trade("SPY") is not None
+
+
 def test_reject_non_buy_entry(tmp_path: Path) -> None:
     mgr, _store, _s = _mgr(tmp_path)
     now = datetime(2024, 6, 13, 10, 30, tzinfo=ET)

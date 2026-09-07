@@ -279,6 +279,9 @@ class MomentumScalpStrategy(Strategy):
             return max(trade.stop_price, trade.entry_price)
         return trade.stop_price
 
+    def trail_stop(self, trade: OpenTrade, last_high: float) -> float:
+        return self.breakeven_stop(trade, last_high)
+
 
 @register_strategy
 class MomentumReclaimStrategy(MomentumScalpStrategy):

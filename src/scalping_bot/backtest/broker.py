@@ -98,7 +98,7 @@ class HistoricalReplayBroker(Broker):
         ts = self._now
         return MarketClock(
             timestamp=ts,
-            is_open=self._is_rth(ts),
+            is_open=self._session_open(ts),
             next_close=ts.replace(hour=16, minute=0, second=0, microsecond=0) if ts.tzinfo else ts,
         )
 
@@ -152,12 +152,14 @@ class HistoricalReplayBroker(Broker):
         ts = now or self._now
         if self.asset_class(symbol) is AssetClass.CRYPTO:
             return True
-        if not self._is_rth(ts):
+        if not self._session_open(ts):
             return False
         bars = self.get_bars(symbol, "1Min", 1)
         if not bars:
             return False
-        # Skip stale prints (crypto-only ticks on the unified clock).
+        # Daily Yahoo bars sit at a session timestamp; allow weekend/holiday gaps.
+        if self.interval_minutes >= 390:
+            return ts - bars[-1].timestamp <= timedelta(days=5)
         max_age = timedelta(minutes=max(self.interval_minutes, 1) * 2)
         return ts - bars[-1].timestamp <= max_age
 
@@ -181,6 +183,15 @@ class HistoricalReplayBroker(Broker):
             return series[end - 1].close
 
         self.ledger.mark_to_market(px)
+
+    def _session_open(self, ts: datetime) -> bool:
+        local = ts.astimezone(ET) if ts.tzinfo else ts.replace(tzinfo=ET)
+        if local.weekday() >= 5:
+            return False
+        # Daily (and coarser) bars are not stamped inside 09:30–16:00.
+        if self.interval_minutes >= 390:
+            return True
+        return self._is_rth(ts)
 
     @staticmethod
     def _is_rth(ts: datetime) -> bool:

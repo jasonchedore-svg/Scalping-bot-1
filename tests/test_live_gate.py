@@ -61,3 +61,34 @@ def test_live_allowed_only_with_all_gates() -> None:
     s = Settings.model_validate(payload)
     s.assert_trading_mode()
     assert s.effective_base_url() == LIVE_BASE_URL
+
+
+def test_swing_does_not_weaken_live_gates() -> None:
+    payload = Settings().model_dump()
+    payload.update(
+        {
+            "paper": False,
+            "mode": "swing",
+            "allow_live_trading": False,
+            "live_confirmed": False,
+            "alpaca_api_key": "key",
+            "alpaca_secret_key": "secret",
+            "alpaca_base_url": LIVE_BASE_URL,
+        }
+    )
+    s = Settings.model_validate(payload)
+    assert s.is_swing()
+    with pytest.raises(LiveTradingDisabledError, match="hard-gated"):
+        s.assert_trading_mode()
+
+
+def test_swing_profile_widens_stops() -> None:
+    s = Settings.model_validate({**Settings().model_dump(), "mode": "swing"})
+    assert s.strategy == "trend_swing"
+    assert s.bar_timeframe == "1Day"
+    assert s.hold_overnight is True
+    assert s.session_flatten is False
+    assert s.max_stop_pct >= 0.10
+    assert s.max_trades_per_day <= 2
+    assert s.paper is True
+    assert s.allow_live_trading is False
