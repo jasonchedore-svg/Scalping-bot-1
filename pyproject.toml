@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "scalping-bot"
 version = "0.1.0"
-description = "Paper-first scalping and day-trading bot for US stocks and crypto (Alpaca)."
+description = "Paper-first swing (recommended) and educational scalping bot with key-free Yahoo backtests."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -25,6 +25,7 @@ dependencies = [
   "python-dotenv>=1.0",
   "structlog>=24.1",
   "typer>=0.12",
+  "yfinance>=0.2.40",
 ]
 
 [project.optional-dependencies]

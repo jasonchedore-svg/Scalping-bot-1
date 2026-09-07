@@ -11,3 +11,11 @@ def test_start_live_is_hard_gated() -> None:
     assert result.exit_code == 2
     combined = (result.output or "") + str(result.exception or "")
     assert "hard-gated" in combined.lower() or "Live trading" in combined
+
+
+def test_start_live_swing_is_still_hard_gated() -> None:
+    runner = CliRunner()
+    result = runner.invoke(app, ["start", "--live", "--mode", "swing"])
+    assert result.exit_code == 2
+    combined = (result.output or "") + str(result.exception or "")
+    assert "hard-gated" in combined.lower() or "Live trading" in combined

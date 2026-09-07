@@ -77,7 +77,8 @@ class RiskManager:
 
         stop_dist = last_price - signal.stop_price
         if stop_dist / last_price > s.max_stop_pct * 1.25:
-            return RiskDecision(False, "stop_too_wide_for_scalp")
+            reason = "stop_too_wide" if s.is_swing() else "stop_too_wide_for_scalp"
+            return RiskDecision(False, reason)
 
         cash_cap = max(account.cash, 0.0)
         if not s.allow_margin:

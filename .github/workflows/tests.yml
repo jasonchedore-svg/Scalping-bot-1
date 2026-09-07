@@ -23,3 +23,5 @@ jobs:
         run: python -m pytest
       - name: Demo (no API keys)
         run: python -m scalping_bot demo --minutes 45 --symbols AAPL,BTC/USD
+      - name: Simulator backtest (no API keys)
+        run: python -m scalping_bot backtest --source simulator --days 1 --symbols AAPL --seed 3 --starting-equity 100000

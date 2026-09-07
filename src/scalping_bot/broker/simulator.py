@@ -2,16 +2,15 @@ from __future__ import annotations
 
 import random
 from datetime import datetime, timedelta
-from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from scalping_bot.broker.base import Broker
+from scalping_bot.broker.ledger import SimulatedLedger
 from scalping_bot.logging_setup import get_logger
 from scalping_bot.models import (
     Account,
     AssetClass,
     Bar,
-    BrokerError,
     MarketClock,
     Order,
     OrderRequest,
@@ -42,18 +41,31 @@ class LocalPaperBroker(Broker):
         stock_session_open: bool = True,
     ) -> None:
         self.symbols = [normalize_symbol(s) for s in symbols]
-        self.cash = cash
-        self.equity_offset = 0.0
         self._rng = random.Random(seed)
         self._now = now or datetime(2024, 6, 13, 10, 0, tzinfo=ET)
         self.stock_session_open = stock_session_open
         self._bars: dict[str, list[Bar]] = {s: [] for s in self.symbols}
-        self._positions: dict[str, Position] = {}
-        self._orders: list[Order] = []
         self._start_prices = {s: _default_price(s) for s in self.symbols}
-        self.slippage_bps = {"stock": 2.0, "crypto": 4.0}
-        self.crypto_fee_bps = 15.0
+        self.ledger = SimulatedLedger(cash)
+        self.slippage_bps = self.ledger.slippage_bps
+        self.crypto_fee_bps = self.ledger.crypto_fee_bps
         self._seed_history(120)
+
+    @property
+    def cash(self) -> float:
+        return self.ledger.cash
+
+    @cash.setter
+    def cash(self, value: float) -> None:
+        self.ledger.cash = value
+
+    @property
+    def _positions(self) -> dict[str, Position]:
+        return self.ledger.positions
+
+    @property
+    def _orders(self) -> list[Order]:
+        return self.ledger.orders
 
     def _seed_history(self, n: int) -> None:
         for symbol in self.symbols:
@@ -96,22 +108,16 @@ class LocalPaperBroker(Broker):
         return bar, nxt
 
     def get_account(self) -> Account:
-        invested = sum(p.market_value for p in self._positions.values())
-        equity = self.cash + invested
-        return Account(
-            equity=equity,
-            cash=self.cash,
-            buying_power=self.cash,
-            paper=True,
-        )
+        self._mark_to_market()
+        return self.ledger.get_account()
 
     def get_positions(self) -> list[Position]:
         self._mark_to_market()
-        return list(self._positions.values())
+        return self.ledger.get_positions()
 
     def get_position(self, symbol: str) -> Position | None:
         self._mark_to_market()
-        return self._positions.get(normalize_symbol(symbol))
+        return self.ledger.get_position(symbol)
 
     def get_clock(self) -> MarketClock:
         return MarketClock(
@@ -142,80 +148,15 @@ class LocalPaperBroker(Broker):
 
     def submit_order(self, request: OrderRequest) -> Order:
         symbol = normalize_symbol(request.symbol)
-        asset = infer_asset_class(symbol)
-        if request.qty <= 0:
-            raise BrokerError("qty must be positive")
         raw = self.last_price(symbol)
-        slip = self.slippage_bps["crypto" if asset is AssetClass.CRYPTO else "stock"] / 10_000.0
-        if request.side is Side.BUY:
-            px = raw * (1.0 + slip)
-        else:
-            px = raw * (1.0 - slip)
-        px = round_price(px, asset)
-        notional = px * request.qty
-        fee = notional * (self.crypto_fee_bps / 10_000.0) if asset is AssetClass.CRYPTO else 0.0
-
-        realized = 0.0
-        if request.side is Side.BUY:
-            if notional + fee > self.cash + 1e-6:
-                raise BrokerError("insufficient cash in simulator")
-            self.cash -= notional + fee
-            existing = self._positions.get(symbol)
-            if existing:
-                new_qty = existing.qty + request.qty
-                avg = (existing.avg_entry_price * existing.qty + px * request.qty) / new_qty
-            else:
-                new_qty = request.qty
-                avg = px
-            self._positions[symbol] = Position(
-                symbol=symbol,
-                qty=new_qty,
-                avg_entry_price=avg,
-                market_value=new_qty * px,
-                unrealized_pl=0.0,
-                asset_class=asset,
-                side=Side.BUY,
-            )
-        else:
-            existing = self._positions.get(symbol)
-            if existing is None or existing.qty <= 0:
-                raise BrokerError(f"no long position to sell for {symbol}")
-            sell_qty = min(request.qty, existing.qty)
-            realized = (px - existing.avg_entry_price) * sell_qty - fee
-            self.cash += px * sell_qty - fee
-            remaining = existing.qty - sell_qty
-            if remaining <= 1e-12:
-                self._positions.pop(symbol, None)
-            else:
-                self._positions[symbol] = Position(
-                    symbol=symbol,
-                    qty=remaining,
-                    avg_entry_price=existing.avg_entry_price,
-                    market_value=remaining * px,
-                    unrealized_pl=(px - existing.avg_entry_price) * remaining,
-                    asset_class=asset,
-                    side=Side.BUY,
-                )
-
-        order = Order(
-            id=str(uuid4()),
-            symbol=symbol,
-            qty=request.qty,
-            side=request.side,
-            status="filled",
-            filled_qty=request.qty,
-            filled_avg_price=px,
-            client_order_id=request.client_order_id,
-        )
-        self._orders.append(order)
+        order = self.ledger.fill(request, raw)
         log.info(
             "simulator_fill",
             symbol=symbol,
             side=request.side.value,
             qty=request.qty,
-            price=px,
+            price=order.filled_avg_price,
             reason=request.reason,
-            realized_pl=round(realized, 4),
         )
         self._mark_to_market()
         return order
@@ -258,17 +199,7 @@ class LocalPaperBroker(Broker):
         self._mark_to_market()
 
     def _mark_to_market(self) -> None:
-        for symbol, pos in list(self._positions.items()):
-            px = self.last_price(symbol)
-            self._positions[symbol] = Position(
-                symbol=symbol,
-                qty=pos.qty,
-                avg_entry_price=pos.avg_entry_price,
-                market_value=pos.qty * px,
-                unrealized_pl=(px - pos.avg_entry_price) * pos.qty,
-                asset_class=pos.asset_class,
-                side=pos.side,
-            )
+        self.ledger.mark_to_market(self.last_price)
 
     def _seed_one(self, symbol: str, n: int) -> None:
         price = self._start_prices[symbol]

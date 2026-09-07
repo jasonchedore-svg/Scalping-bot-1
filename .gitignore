@@ -23,6 +23,7 @@ data/*.db
 data/*.pid
 data/*.json
 data/*.log
+data/cache/
 *.log
 
 .DS_Store
